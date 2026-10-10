@@ -112,3 +112,48 @@ def test_api_is_read_only(client: TestClient, db: Path) -> None:
     client.get("/v1/risk", headers=H)
     with DuckDBRepository(db) as r:
         assert len(r.get_costs()) == before
+
+
+def test_dashboard_page_is_public(client: TestClient) -> None:
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "v1/ui/overview" in r.text
+    assert client.get("/v1/ui/overview").status_code == 401  # but its data is not
+
+
+def test_ui_overview(client: TestClient) -> None:
+    r = client.get("/v1/ui/overview?budget=20000", headers=H)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert set(d) >= {
+        "meta",
+        "kpis",
+        "fan",
+        "daily",
+        "incidents",
+        "services",
+        "accounts_monthly",
+        "variance",
+        "waste",
+        "commitments",
+    }
+    k = d["kpis"]
+    assert k["p5"] <= k["median"] <= k["car"] <= k["es"]
+    assert 0 <= k["breach_probability"] <= 1
+    bands = d["fan"]["bands"]
+    assert all(b["p5"] <= b["p25"] <= b["p50"] <= b["p75"] <= b["p95"] for b in bands)
+    assert bands[-1]["date"] == d["fan"]["month_end"]
+    assert bands[-1]["p95"] == pytest.approx(k["car"], rel=1e-6)
+    assert d["fan"]["actual"][-1]["cum"] == pytest.approx(k["mtd"], abs=0.02)
+    assert len(d["accounts_monthly"]["accounts"]) == 4
+    # cached: the second call is instant and identical
+    assert client.get("/v1/ui/overview?budget=20000", headers=H).json() == d
+
+
+def test_ui_overview_inr_budget_is_in_display_currency(client: TestClient) -> None:
+    usd = client.get("/v1/ui/overview?budget=20000", headers=H).json()
+    inr = client.get("/v1/ui/overview?currency=INR&budget=1760000", headers=H).json()
+    assert inr["meta"]["budget"] == pytest.approx(1_760_000)
+    assert inr["kpis"]["mtd"] == pytest.approx(usd["kpis"]["mtd"] * 88, rel=1e-6)
+    assert inr["kpis"]["breach_probability"] == pytest.approx(usd["kpis"]["breach_probability"])

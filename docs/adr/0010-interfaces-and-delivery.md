@@ -9,8 +9,11 @@ Date: 2026-10-10 · Status: Accepted
   `hmac.compare_digest` over every configured key (rotation without downtime). It refuses to start
   without keys; `--no-auth` is only allowed on localhost. Errors are JSON `{error, hint}`.
   Optional extra (`costguard[api]`), so the CLI stays light.
-- **Dashboard**: Streamlit (optional extra), `st.cache_data` for DB reads and simulations,
-  tested headless with `streamlit.testing.AppTest`.
+- **Dashboard**: a single self-contained web page served by the API at `/` (`costguard ui`),
+  with hand-drawn SVG charts (no JS dependencies, works offline), one `/v1/ui/overview` call
+  cached until the database changes, light/dark themes and USD/INR with Indian digit grouping.
+  The hero is a **fan chart** of cumulative month spend (as central banks use for inflation
+  forecasts). The earlier Streamlit dashboard remains as `costguard ui --streamlit`.
 - **Alerts**: Slack incoming webhook via stdlib `urllib`; `build_alerts` is a pure function;
   exit code 11 = alerts raised (so cron/CI can tell "found something" from "crashed").
 - **Delivery**: multi-stage Docker (uv build stage, slim non-root runtime, healthcheck);
@@ -23,6 +26,6 @@ Date: 2026-10-10 · Status: Accepted
 | Service layer | API calls the CLI functions | CLI functions print and exit; mixing transport with logic |
 | API keys | OAuth2/JWT | No users or browser login; machine-to-machine read access. Put it behind an IdP proxy if needed |
 | FastAPI | Flask | Type-hint validation and OpenAPI docs for free |
-| Streamlit | Dash, React | Python-only, quickest path to an interactive demo; a real product would use a JS front end on the API |
+| Plain HTML + SVG page on the API | Streamlit, React + chart library | Streamlit was the first version: fast to build, but generic-looking and hard to control. React adds a build step and node toolchain; one static page keeps install = `pip install` |
 | GitHub Actions + OIDC | Lambda + EventBridge | Same result with fewer parts (no EFS/S3 state sync, no image limits) for a daily job |
 | Slack webhook | Slack SDK / bot token | Webhook can only post to one channel: smallest possible privilege |

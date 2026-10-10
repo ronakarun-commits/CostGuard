@@ -26,7 +26,13 @@ Everything works **offline on realistic synthetic data** (four accounts, nine se
 weekly seasonality, and labelled injected anomalies), so you can try it without an AWS account.
 Connecting to AWS needs only a read-only IAM policy.
 
+![costguard web dashboard](docs/img/web-dashboard.png)
+
+<details>
+<summary>Terminal version</summary>
+
 ![dashboard](docs/img/dashboard.svg)
+</details>
 
 ## Quick start
 
@@ -45,7 +51,7 @@ uv run costguard variance
 uv run costguard commitments
 uv run costguard fx                          # real ECB USD/INR rates (needs internet)
 uv run costguard audit -f html -o audit.html
-uv run costguard ui                          # Streamlit dashboard
+uv run costguard ui                          # web dashboard in your browser
 ```
 
 Every report can be printed as a table or exported with `-f json|csv|html -o FILE`. Add

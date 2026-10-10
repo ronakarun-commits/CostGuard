@@ -757,29 +757,57 @@ def serve(
 def ui(
     ctx: typer.Context,
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8501,
+    use_streamlit: Annotated[
+        bool, typer.Option("--streamlit", help="Use the older Streamlit dashboard instead.")
+    ] = False,
+    open_browser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open a browser tab.")
+    ] = True,
 ) -> None:
-    """Open the Streamlit dashboard (needs `costguard[dashboard]`)."""
+    """Open the web dashboard in your browser (needs `costguard[api]`). Ctrl+C to stop."""
     import os
     import subprocess
     from importlib.util import find_spec
 
     from costguard.errors import ConfigError
 
-    if find_spec("streamlit") is None:
-        raise ConfigError(
-            "The dashboard needs extra packages.", 'pip install "costguard[dashboard]"'
-        )
-    script = Path(__file__).parent / "interfaces" / "dashboard_app.py"
-    env = {**os.environ, "COSTGUARD_DB_PATH": str(_state(ctx).settings.db_path.resolve())}
-    # Run Streamlit with *this* interpreter (python -m streamlit), never whatever "streamlit"
-    # happens to be first on PATH (e.g. Anaconda's), which can't import costguard.
-    raise typer.Exit(
-        subprocess.call(  # noqa: S603 - fixed arguments, no shell
-            [sys.executable, "-m", "streamlit", "run", str(script), "--server.port", str(port),
-             "--server.headless", "false", "--browser.gatherUsageStats", "false"],
-            env=env,
-        )
-    )  # fmt: skip
+    state = _state(ctx)
+    if use_streamlit:
+        if find_spec("streamlit") is None:
+            raise ConfigError(
+                "The Streamlit dashboard needs extra packages.",
+                'pip install "costguard[dashboard]"',
+            )
+        script = Path(__file__).parent / "interfaces" / "dashboard_app.py"
+        env = {**os.environ, "COSTGUARD_DB_PATH": str(state.settings.db_path.resolve())}
+        # Run Streamlit with *this* interpreter (python -m streamlit), never whatever "streamlit"
+        # happens to be first on PATH (e.g. Anaconda's), which can't import costguard.
+        raise typer.Exit(
+            subprocess.call(  # noqa: S603 - fixed arguments, no shell
+                [sys.executable, "-m", "streamlit", "run", str(script), "--server.port", str(port),
+                 "--server.headless", "false", "--browser.gatherUsageStats", "false"],
+                env=env,
+            )
+        )  # fmt: skip
+
+    if find_spec("uvicorn") is None or find_spec("fastapi") is None:
+        raise ConfigError("The dashboard needs extra packages.", 'pip install "costguard[api]"')
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from costguard.interfaces.api import create_app
+
+    with state.repo() as repo:
+        require_data(repo)  # fail fast with the "run generate first" hint
+    # Local only: bound to 127.0.0.1, so no API key is needed.
+    api = create_app(state.settings, require_auth=False)
+    url = f"http://127.0.0.1:{port}/"
+    console.print(f"Dashboard running at [bold]{url}[/]  (Ctrl+C to stop)")
+    if open_browser:
+        threading.Timer(1.5, webbrowser.open, args=(url,)).start()
+    uvicorn.run(api, host="127.0.0.1", port=port, log_level="warning")
 
 
 @app.command()

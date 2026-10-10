@@ -80,6 +80,36 @@ def create_app(settings: Settings | None = None, *, require_auth: bool = True) -
         status = 404 if isinstance(exc, NoDataError) else 400
         return JSONResponse({"error": str(exc), "hint": exc.hint}, status_code=status)
 
+    from importlib.resources import files
+
+    page = (files("costguard.interfaces") / "web" / "index.html").read_text(encoding="utf-8")
+    cache: dict[tuple[object, ...], dict[str, object]] = {}
+
+    @app.get("/", include_in_schema=False)
+    def dashboard_page() -> HTMLResponse:
+        """The web dashboard. The page itself is public; its data calls need the API key."""
+        return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
+
+    @app.get("/v1/ui/overview", dependencies=[Depends(authorise)], tags=["dashboard"])
+    def ui_overview(
+        repo: Repo,
+        disp: Disp,
+        budget: Annotated[
+            float | None, Query(gt=0, description="In the requested currency")
+        ] = None,
+        level: Annotated[float, Query(ge=0.8, le=0.995)] = 0.95,
+    ) -> dict[str, object]:
+        """All dashboard data in one call. Cached until the database file changes."""
+        import os
+
+        path = str(settings.db_path)
+        key = (path, os.path.getmtime(path), disp.currency, budget, level)
+        if key not in cache:
+            cache.clear()  # keep only the latest view
+            budget_usd = budget / disp.fx if budget else settings.budget_monthly_usd
+            cache[key] = services.overview(repo, disp, budget=budget_usd, level=level)
+        return cache[key]
+
     @app.get("/health", tags=["meta"])
     def health() -> dict[str, str]:
         """Liveness probe (no auth, no database access)."""

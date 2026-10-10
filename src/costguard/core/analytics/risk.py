@@ -66,6 +66,34 @@ class MonthEndRisk:
         return self.car - self.expected
 
 
+def _month_end_paths(
+    series: pd.Series,
+    *,
+    level: float,
+    model: Model,
+    n_paths: int,
+    seed: int,
+    calibrate: bool,
+) -> tuple[date, float, int, pd.DatetimeIndex, np.ndarray]:
+    """Cumulative simulated spend for the rest of the month: (as_of, mtd, remaining, index,
+    cumulative paths of shape (n_paths, remaining), *excluding* month-to-date)."""
+    if not 0.5 < level < 1:
+        msg = "level must be between 0.5 and 1"
+        raise ValueError(msg)
+    s = series.astype(float).asfreq("D", fill_value=0.0)
+    as_of = s.index[-1].date()
+    mtd = float(s[s.index >= pd.Timestamp(as_of.replace(day=1))].sum())
+    remaining = month_end_horizon(as_of)
+    if remaining == 0:
+        return as_of, mtd, 0, pd.DatetimeIndex([]), np.zeros((n_paths, 0))
+    fc = forecast(s, remaining, model=model, n_paths=n_paths, seed=seed)
+    factor = 1.0
+    if calibrate:
+        scores = daily_scores(s, level=level, model=model, seed=seed)
+        factor = conformal_factor(scores, as_of, level)
+    return as_of, mtd, remaining, fc.index, np.cumsum(fc.widened(factor).paths, axis=1)
+
+
 def month_end_risk(
     series: pd.Series,
     *,
@@ -77,24 +105,37 @@ def month_end_risk(
     calibrate: bool = True,
 ) -> MonthEndRisk:
     """Distribution of this month's total = actual month-to-date + simulated rest of month."""
-    if not 0.5 < level < 1:
-        msg = "level must be between 0.5 and 1"
-        raise ValueError(msg)
-    s = series.astype(float).asfreq("D", fill_value=0.0)
-    as_of = s.index[-1].date()
-    mtd = float(s[s.index >= pd.Timestamp(as_of.replace(day=1))].sum())
-    remaining = month_end_horizon(as_of)
-    if remaining == 0:
-        totals = np.full(n_paths, mtd)
-    else:
-        fc = forecast(s, remaining, model=model, n_paths=n_paths, seed=seed)
-        factor = 1.0
-        if calibrate:
-            scores = daily_scores(s, level=level, model=model, seed=seed)
-            factor = conformal_factor(scores, as_of, level)
-        totals = mtd + fc.widened(factor).totals()
-    return summarise(totals, as_of=as_of, mtd=mtd, level=level, budget=budget,
+    risk, _ = month_end_fan(series, budget=budget, level=level, model=model, n_paths=n_paths,
+                            seed=seed, calibrate=calibrate)  # fmt: skip
+    return risk
+
+
+FAN_QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
+
+
+def month_end_fan(
+    series: pd.Series,
+    *,
+    budget: float | None = None,
+    level: float = 0.95,
+    model: Model = "ets",
+    n_paths: int = 5000,
+    seed: int = 0,
+    calibrate: bool = True,
+) -> tuple[MonthEndRisk, pd.DataFrame]:
+    """Month-end risk plus a fan chart: quantiles of *cumulative* month spend for each remaining
+    day (columns p5, p25, p50, p75, p95; index = date). Empty frame on the last day of a month."""
+    as_of, mtd, remaining, index, cum = _month_end_paths(
+        series, level=level, model=model, n_paths=n_paths, seed=seed, calibrate=calibrate
+    )
+    totals = mtd + cum[:, -1] if remaining else np.full(n_paths, mtd)
+    risk = summarise(totals, as_of=as_of, mtd=mtd, level=level, budget=budget,
                      remaining=remaining)  # fmt: skip
+    cols = [f"p{round(q * 100)}" for q in FAN_QUANTILES]
+    if not remaining:
+        return risk, pd.DataFrame(columns=cols)
+    fan = pd.DataFrame(mtd + np.quantile(cum, FAN_QUANTILES, axis=0).T, index=index, columns=cols)
+    return risk, fan
 
 
 def summarise(

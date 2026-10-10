@@ -156,7 +156,7 @@ def test_ui_launches_streamlit(db: str, monkeypatch: pytest.MonkeyPatch) -> None
 
     calls: list[Any] = []
     monkeypatch.setattr(subprocess, "call", lambda args, env: calls.append((args, env)) or 0)
-    result = runner.invoke(app, ["--db", db, "ui"])
+    result = runner.invoke(app, ["--db", db, "ui", "--streamlit"])
     assert result.exit_code == 0
     args, env = calls[0]
     assert args[1:4] == ["-m", "streamlit", "run"]
@@ -168,6 +168,30 @@ def test_ui_without_streamlit(db: str, monkeypatch: pytest.MonkeyPatch) -> None:
     import importlib.util
 
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
-    result = runner.invoke(app, ["--db", db, "ui"])
+    result = runner.invoke(app, ["--db", db, "ui", "--streamlit"])
     assert result.exit_code == 2
     assert "costguard[dashboard]" in result.output
+    web = runner.invoke(app, ["--db", db, "ui"])
+    assert web.exit_code == 2
+    assert "costguard[api]" in web.output
+
+
+def test_ui_web_dashboard(db: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    import webbrowser
+
+    import uvicorn
+
+    runs: list[dict[str, Any]] = []
+    opened: list[str] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app_, **kw: runs.append(kw))
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+    result = runner.invoke(app, ["--db", db, "ui", "--port", "9123", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert runs[0] == {"host": "127.0.0.1", "port": 9123, "log_level": "warning"}
+    assert "127.0.0.1:9123" in result.stdout
+    assert opened == []
+
+
+def test_ui_web_needs_data(tmp_path: Any) -> None:
+    result = runner.invoke(app, ["--db", str(tmp_path / "none.duckdb"), "ui", "--no-open"])
+    assert result.exit_code == 3
