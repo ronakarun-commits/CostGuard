@@ -20,6 +20,7 @@ from typing import Annotated, Literal
 import numpy as np
 import pandas as pd
 import typer
+from rich.markup import escape
 
 from costguard import __version__
 from costguard.config import Settings, load_settings
@@ -30,6 +31,7 @@ from costguard.interfaces.console import anomalies_table, console, err_console, 
 from costguard.interfaces.render import Format, render
 from costguard.logging_setup import setup_logging
 from costguard.providers.synthetic import ACCOUNTS, SyntheticProvider
+from costguard.services import Display, require_data
 from costguard.storage.duckdb_repo import DuckDBRepository, GroupBy
 
 log = logging.getLogger("costguard")
@@ -62,6 +64,10 @@ class State:
         """USD -> reporting currency multiplier (static fallback; Phase 6 uses real rates)."""
         return self.settings.usd_inr_fallback_rate if self.currency == "INR" else 1.0
 
+    @property
+    def display(self) -> Display:
+        return Display(self.currency, self.fx)
+
     def repo(self) -> DuckDBRepository:
         return DuckDBRepository(self.settings.db_path)
 
@@ -74,9 +80,11 @@ def handle_errors[**P, R](func: Callable[P, R]) -> Callable[P, R]:
         try:
             return func(*args, **kwargs)
         except CostGuardError as exc:
-            err_console.print(f"[bold red]Error:[/] {exc}")
+            # escape(): messages may contain [brackets] (e.g. costguard[api]) that Rich would
+            # otherwise treat as markup and silently drop
+            err_console.print(f"[bold red]Error:[/] {escape(str(exc))}")
             if exc.hint:
-                err_console.print(f"[yellow]Hint:[/] {exc.hint}")
+                err_console.print(f"[yellow]Hint:[/] {escape(exc.hint)}")
             raise typer.Exit(code=exc.exit_code) from exc
 
     return wrapper
@@ -162,16 +170,6 @@ def _emit(report: Report, fmt: Format, output: Path | None) -> None:
         sys.stdout.write(text if text.endswith("\n") else text + "\n")
 
 
-def _require_data(repo: DuckDBRepository) -> tuple[date, date]:
-    bounds = repo.date_bounds()
-    if bounds is None:
-        raise NoDataError(
-            "No cost data in the database.",
-            "Run `costguard generate` (synthetic) or `costguard pull` (AWS) first.",
-        )
-    return bounds
-
-
 # ---- general ---------------------------------------------------------------------------------
 
 
@@ -234,7 +232,7 @@ def show(
     """Summarise stored cost by service, account, region, category, date or month."""
     state = _state(ctx)
     with state.repo() as repo:
-        lo, hi = _require_data(repo)
+        lo, hi = require_data(repo)
         period = None
         label = f"{lo} → {hi}"
         if not all_time:
@@ -274,15 +272,12 @@ def dashboard(
     output: OutputOption = None,
 ) -> None:
     """Month-to-date spend, run-rate forecast, budget use, top services and biggest movers."""
-    from costguard.core.reports import dashboard as build
+    from costguard import services
 
     state = _state(ctx)
     with state.repo() as repo:
-        _require_data(repo)
-        wide = repo.daily_series(by="service") * state.fx
-    budget_usd = budget or state.settings.budget_monthly_usd
-    report = build(wide, budget=budget_usd * state.fx if budget_usd else None,
-                   currency=state.currency)  # fmt: skip
+        report = services.dashboard(repo, state.display,
+                                    budget or state.settings.budget_monthly_usd)  # fmt: skip
     _emit(report, fmt, output)
 
 
@@ -298,16 +293,11 @@ def trend(
     output: OutputOption = None,
 ) -> None:
     """Cost per day/week/month for the top services (or accounts, regions...)."""
-    from costguard.core.reports import trend as build
+    from costguard import services
 
-    if by in ("date", "month"):
-        raise typer.BadParameter("use service, account, region or category", param_hint="--by")
     state = _state(ctx)
     with state.repo() as repo:
-        _require_data(repo)
-        wide = repo.daily_series(by=by) * state.fx
-    report = build(wide, freq=freq, top=top, periods=periods, currency=state.currency,
-                   dimension=by)  # fmt: skip
+        report = services.trend(repo, state.display, by=by, freq=freq, top=top, periods=periods)
     _emit(report, fmt, output)
 
 
@@ -340,8 +330,7 @@ def audit(
     output: OutputOption = None,
 ) -> None:
     """Find waste (idle volumes, idle IPs, old snapshots, oversized/old instances), ranked by $."""
-    from costguard.core.reports import audit_report
-    from costguard.core.waste import run_rules
+    from costguard import services
 
     state = _state(ctx)
     if source == "aws":
@@ -358,12 +347,9 @@ def audit(
         from costguard.providers.synthetic_inventory import synthetic_inventory
 
         inventory = synthetic_inventory(seed)
-    try:
-        findings = run_rules(inventory, only=rule_ids, min_saving=min_saving)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="--rule") from exc
-    _emit(audit_report(findings, currency=state.currency, fx=state.fx), fmt, output)
-    total = sum(f.monthly_saving_usd for f in findings)
+    report, total = services.audit(inventory, state.display, rule_ids=rule_ids,
+                                   min_saving=min_saving)  # fmt: skip
+    _emit(report, fmt, output)
     if fail_over is not None and total > fail_over:
         err_console.print(f"[red]Potential saving ${total:,.2f}/month exceeds ${fail_over:,.2f}[/]")
         raise typer.Exit(code=10)
@@ -488,19 +474,14 @@ def anomalies(
     output: OutputOption = None,
 ) -> None:
     """Detect unusual spend per account and service."""
-    from costguard.core.analytics.anomaly import DetectorConfig, detect
-    from costguard.core.insights import anomalies_report
+    from costguard import services
 
     state = _state(ctx)
-    with state.repo() as repo:
-        lo, hi = _require_data(repo)
-        costs = repo.costs_frame()
-    since = lo if all_time else max(lo, hi - timedelta(days=last - 1))
-    cfg = DetectorConfig(threshold=threshold, min_excess=min_excess)
-    with console.status(f"Scoring with {method}..."):
-        found = detect(costs, method, cfg, since=since)
-    _emit(anomalies_report(found, method=method, currency=state.currency, fx=state.fx,
-                           since=str(since)), fmt, output)  # fmt: skip
+    with state.repo() as repo, console.status(f"Scoring with {method}..."):
+        report = services.anomalies(repo, state.display, method=method,
+                                    last_days=None if all_time else last, threshold=threshold,
+                                    min_excess=min_excess)  # fmt: skip
+    _emit(report, fmt, output)
 
 
 @app.command()
@@ -524,7 +505,7 @@ def evaluate(
     if bad:
         raise typer.BadParameter(f"unknown method(s): {', '.join(sorted(bad))}", param_hint="-m")
     with state.repo() as repo:
-        _require_data(repo)
+        require_data(repo)
         costs = repo.costs_frame()
         labels = repo.get_anomalies()
     if not labels:
@@ -548,16 +529,13 @@ def forecast(
     output: OutputOption = None,
 ) -> None:
     """Probabilistic forecast of total daily spend (median and 90% interval)."""
-    from costguard.core.analytics.forecast import forecast as run
-    from costguard.core.insights import forecast_report
+    from costguard import services
 
     state = _state(ctx)
-    with state.repo() as repo:
-        _require_data(repo)
-        series = repo.daily_series()["cost"]
-    with console.status("Simulating..."):
-        fc = run(series, days, model=model, n_paths=paths, seed=seed)
-    _emit(forecast_report(fc, currency=state.currency, fx=state.fx), fmt, output)
+    with state.repo() as repo, console.status("Simulating..."):
+        report = services.forecast(repo, state.display, days=days, model=model, paths=paths,
+                                   seed=seed)  # fmt: skip
+    _emit(report, fmt, output)
 
 
 @app.command()
@@ -576,19 +554,21 @@ def risk(
     output: OutputOption = None,
 ) -> None:
     """Month-end Cost-at-Risk, Expected Shortfall and probability of breaching the budget."""
-    from costguard.core.analytics.risk import month_end_risk
-    from costguard.core.insights import risk_report
+    from costguard import services
 
     state = _state(ctx)
-    with state.repo() as repo:
-        _require_data(repo)
-        series = repo.daily_series()["cost"]
-    with console.status("Simulating month-end..."):
-        result = month_end_risk(series, budget=budget or state.settings.budget_monthly_usd,
-                                level=level, model=model, n_paths=paths, seed=seed,
-                                calibrate=calibrate)  # fmt: skip
-    _emit(risk_report(result, currency=state.currency, fx=state.fx, calibrated=calibrate),
-          fmt, output)  # fmt: skip
+    with state.repo() as repo, console.status("Simulating month-end..."):
+        report = services.risk(
+            repo,
+            state.display,
+            budget=budget or state.settings.budget_monthly_usd,
+            level=level,
+            model=model,
+            calibrate=calibrate,
+            paths=paths,
+            seed=seed,
+        )
+    _emit(report, fmt, output)
 
 
 @app.command()
@@ -606,7 +586,7 @@ def backtest(
 
     state = _state(ctx)
     with state.repo() as repo:
-        _require_data(repo)
+        require_data(repo)
         series = repo.daily_series()["cost"]
     if len(series) < 150:
         raise NoDataError("Backtesting needs at least 150 days of history.")
@@ -620,15 +600,6 @@ def backtest(
 # ---- finance (Phase 6) -----------------------------------------------------------------------
 
 
-def _month_range(month: str) -> DateRange:
-    try:
-        start = date.fromisoformat(f"{month}-01")
-    except ValueError as exc:
-        raise typer.BadParameter("use YYYY-MM", param_hint="month") from exc
-    nxt = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
-    return DateRange(start, nxt)
-
-
 @app.command()
 @handle_errors
 def variance(
@@ -640,37 +611,18 @@ def variance(
     output: OutputOption = None,
 ) -> None:
     """Explain a month's change: calendar, volume (usage) and price (rate) effects."""
-    from costguard.core.finance.variance import price_volume
-    from costguard.core.insights import variance_report
+    from costguard import services
 
     state = _state(ctx)
     with state.repo() as repo:
-        _, hi = _require_data(repo)
-        costs = repo.costs_frame()
-    if current is None:  # default: last complete month
-        last_full = (
-            hi if (hi + timedelta(days=1)).day == 1 else hi.replace(day=1) - timedelta(days=1)
-        )
-        current = f"{last_full:%Y-%m}"
-    cur = _month_range(current)
-    base_range = (
-        _month_range(base) if base else _month_range(f"{cur.start - timedelta(days=1):%Y-%m}")
-    )
-    result = price_volume(costs, base_range, cur)
-    if result.totals["cost_base"] == 0 and result.totals["cost_current"] == 0:
-        raise NoDataError(f"No cost data for {base_range.start:%Y-%m} or {current}.")
-    if result.totals["unattributed"] and abs(result.totals["unattributed"]) > 0.5 * abs(
-        result.totals["change"] or 1
-    ):
+        outcome = services.variance(repo, state.display, current=current, base=base,
+                                    budget=budget or state.settings.budget_monthly_usd)  # fmt: skip
+    if outcome.mostly_unattributed:
         err_console.print(
             "[yellow]Most of the change is unattributed:[/] this data has mixed usage units. "
             "Pull with `costguard pull --detail usage_type` for a price/volume split."
         )
-    report = variance_report(
-        result, currency=state.currency, fx=state.fx,
-        budget=budget or state.settings.budget_monthly_usd,
-    )  # fmt: skip
-    _emit(report, fmt, output)
+    _emit(outcome.report, fmt, output)
 
 
 COMMITMENT_SERVICES = ("Amazon Elastic Compute Cloud - Compute", "AWS Lambda", "AWS Fargate")
@@ -696,7 +648,7 @@ def commitments(
 
     state = _state(ctx)
     with state.repo() as repo:
-        _require_data(repo)
+        require_data(repo)
         wide = repo.daily_series(by="service")
     cols = [c for c in COMMITMENT_SERVICES if c in wide.columns]
     if not cols:
@@ -740,7 +692,7 @@ def fx(
     from costguard.core.insights import fx_report
 
     with _state(ctx).repo() as repo:
-        lo, hi = _require_data(repo)
+        lo, hi = require_data(repo)
         series = repo.daily_series()["cost"]
         rates, source = repo.get_fx("USD", "INR")
         have = (not rates.empty and rates.index.min() <= pd.Timestamp(lo) + pd.Timedelta(days=5)
@@ -770,3 +722,108 @@ def fx(
         "ECB reference rates (frankfurter.dev)" if source == "ecb" else "synthetic (offline demo)"
     )
     _emit(fx_report(bridge, result, source=label), fmt, output)
+
+
+# ---- interfaces (Phase 7) --------------------------------------------------------------------
+
+
+@app.command()
+@handle_errors
+def serve(
+    ctx: typer.Context,
+    host: Annotated[str, typer.Option(help="Interface to bind.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8000,
+    no_auth: Annotated[
+        bool, typer.Option("--no-auth", help="Disable API keys (only allowed on localhost).")
+    ] = False,
+) -> None:
+    """Run the read-only HTTP API (needs `costguard[api]`). Docs at /docs."""
+    from costguard.errors import ConfigError
+
+    try:
+        import uvicorn
+
+        from costguard.interfaces.api import create_app
+    except ImportError as exc:
+        raise ConfigError("The API needs extra packages.", 'pip install "costguard[api]"') from exc
+    if no_auth and host not in ("127.0.0.1", "localhost", "::1"):
+        raise ConfigError("--no-auth is only allowed when binding to localhost.")
+    api = create_app(_state(ctx).settings, require_auth=not no_auth)
+    uvicorn.run(api, host=host, port=port, log_level="info")
+
+
+@app.command()
+@handle_errors
+def ui(
+    ctx: typer.Context,
+    port: Annotated[int, typer.Option(min=1, max=65535)] = 8501,
+) -> None:
+    """Open the Streamlit dashboard (needs `costguard[dashboard]`)."""
+    import os
+    import shutil
+    import subprocess
+    from importlib.util import find_spec
+
+    from costguard.errors import ConfigError
+
+    if find_spec("streamlit") is None:
+        raise ConfigError(
+            "The dashboard needs extra packages.", 'pip install "costguard[dashboard]"'
+        )
+    script = Path(__file__).parent / "interfaces" / "dashboard_app.py"
+    env = {**os.environ, "COSTGUARD_DB_PATH": str(_state(ctx).settings.db_path.resolve())}
+    exe = shutil.which("streamlit") or "streamlit"
+    raise typer.Exit(
+        subprocess.call(  # noqa: S603 - fixed arguments, no shell
+            [exe, "run", str(script), "--server.port", str(port), "--server.headless", "false",
+             "--browser.gatherUsageStats", "false"],
+            env=env,
+        )
+    )  # fmt: skip
+
+
+@app.command()
+@handle_errors
+def alert(
+    ctx: typer.Context,
+    days: Annotated[int, typer.Option(min=1, help="Look for anomalies in the last N days.")] = 2,
+    budget: Annotated[float | None, typer.Option(min=0, help="Monthly budget in USD.")] = None,
+    breach_threshold: Annotated[
+        float, typer.Option(min=0, max=1, help="Alert if P(over budget) is at least this.")
+    ] = 0.5,
+    dry_run: Annotated[bool, typer.Option(help="Print the alert instead of posting it.")] = False,
+) -> None:
+    """Check for new anomalies and budget risk; post to Slack if anything needs attention.
+
+    Designed for cron / scheduled CI. Exit code 0 = all clear, 11 = alerts raised.
+    """
+    from costguard.core.analytics.anomaly import detect
+    from costguard.core.analytics.risk import month_end_risk
+    from costguard.interfaces.notify import build_alerts, post_slack, slack_payload
+
+    state = _state(ctx)
+    budget_usd = budget or state.settings.budget_monthly_usd
+    with state.repo() as repo:
+        _, hi = require_data(repo)
+        incidents = detect(repo.costs_frame(), "baseline", since=hi - timedelta(days=days - 1))
+        risk_result = (
+            month_end_risk(repo.daily_series()["cost"], budget=budget_usd, n_paths=3000)
+            if budget_usd
+            else None
+        )
+    alerts = build_alerts(incidents, risk_result, breach_threshold=breach_threshold,
+                          currency=state.currency, fx=state.fx)  # fmt: skip
+    if not alerts:
+        console.print("[green]✓[/] All clear: no new anomalies, budget risk below threshold.")
+        return
+    webhook = state.settings.slack_webhook_url
+    if dry_run or webhook is None:
+        if webhook is None and not dry_run:
+            err_console.print("[yellow]COSTGUARD_SLACK_WEBHOOK_URL not set; printing instead.[/]")
+        import json
+
+        sys.stdout.write(json.dumps(slack_payload(alerts), indent=2, ensure_ascii=False) + "\n")
+    else:
+        post_slack(webhook.get_secret_value(), alerts)
+        console.print(f"[green]✓[/] Posted {len(alerts)} alert(s) to Slack.")
+    raise typer.Exit(code=11)

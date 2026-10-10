@@ -1,0 +1,54 @@
+# Daily cost check against a real AWS account. Disabled until you opt in:
+#   1. Create the OIDC role described in docs/deployment.md ("Scheduled checks on GitHub").
+#   2. Add repository variables AWS_ROLE_ARN and COSTGUARD_BUDGET_MONTHLY_USD,
+#      and the secret COSTGUARD_SLACK_WEBHOOK_URL.
+#   3. Uncomment the `schedule` trigger.
+# GitHub gets short-lived AWS credentials via OIDC: no access keys are stored anywhere.
+name: Scheduled cost check
+
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "30 3 * * *"   # 09:00 IST, after Cost Explorer's daily refresh
+
+permissions:
+  contents: read
+  id-token: write   # needed to request the OIDC token for AWS
+
+concurrency: { group: scheduled-alert, cancel-in-progress: false }
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      COSTGUARD_DB_PATH: .costguard/costguard.duckdb
+      COSTGUARD_BUDGET_MONTHLY_USD: ${{ vars.COSTGUARD_BUDGET_MONTHLY_USD }}
+      COSTGUARD_SLACK_WEBHOOK_URL: ${{ secrets.COSTGUARD_SLACK_WEBHOOK_URL }}
+      COSTGUARD_LOG_FORMAT: json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - name: Restore cost history and API cache
+        uses: actions/cache@v4
+        with:
+          path: .costguard
+          key: costguard-db-${{ github.run_id }}
+          restore-keys: costguard-db-
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Pull last 90 days (cached; typically 1-3 paid requests)
+        run: uv run costguard pull --days 90
+      - name: Alert on anomalies / budget risk
+        run: |
+          uv run costguard alert --days 2 || code=$?
+          # 11 = alerts were posted; that's a successful run, not a failure
+          if [ "${code:-0}" != "0" ] && [ "${code}" != "11" ]; then exit "${code}"; fi
+      - name: Reports
+        run: |
+          uv run costguard dashboard -f html -o reports/dashboard.html
+          uv run costguard risk -f html -o reports/risk.html
+      - uses: actions/upload-artifact@v4
+        with: { name: cost-reports, path: reports/, retention-days: 30 }

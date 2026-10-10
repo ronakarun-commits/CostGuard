@@ -1,0 +1,37 @@
+# Local demo: synthetic data + API + dashboard.
+#   echo COSTGUARD_API_KEYS='["change-me-to-a-long-random-string"]' > .env
+#   docker compose run --rm generate      # once: create one year of synthetic data
+#   docker compose up api ui              # http://localhost:8000/docs  ·  http://localhost:8501
+services:
+  generate:
+    build: { context: ., args: { EXTRAS: all } }
+    image: costguard:local
+    command: ["generate"]
+    volumes: [costguard-data:/data]
+    profiles: [setup]
+
+
+  api:
+    image: costguard:local
+    build: { context: ., args: { EXTRAS: all } }
+    env_file: [.env]
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: [costguard-data:/data:ro]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+  ui:
+    image: costguard:local
+    entrypoint: ["streamlit", "run", "/app/.venv/lib/python3.12/site-packages/costguard/interfaces/dashboard_app.py",
+                 "--server.address", "0.0.0.0", "--server.headless", "true",
+                 "--browser.gatherUsageStats", "false"]
+    command: []
+    healthcheck: { disable: true }
+    ports: ["127.0.0.1:8501:8501"]
+    volumes: [costguard-data:/data:ro]
+    depends_on: [api]
+
+volumes:
+  costguard-data:

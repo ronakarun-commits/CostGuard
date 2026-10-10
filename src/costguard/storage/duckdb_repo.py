@@ -95,8 +95,19 @@ _COST_COLUMNS: Final = [
 class DuckDBRepository:
     """Implements the ``CostRepository`` port. Use as a context manager or call ``close()``."""
 
-    def __init__(self, path: str | Path = ":memory:") -> None:
+    def __init__(self, path: str | Path = ":memory:", *, read_only: bool = False) -> None:
+        """``read_only=True`` (used by the API/dashboard) never writes or migrates, so it can't
+        corrupt a database another costguard process is updating."""
         self.path = str(path)
+        if read_only:
+            if self.path == ":memory:" or not Path(self.path).exists():
+                from costguard.errors import NoDataError
+
+                raise NoDataError(
+                    f"Database {self.path} not found.", "Run `costguard generate` or `pull` first."
+                )
+            self.con = duckdb.connect(self.path, read_only=True)
+            return
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.con = duckdb.connect(self.path)

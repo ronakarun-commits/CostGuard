@@ -1,6 +1,6 @@
 """Reproduce docs/evaluation.md: detector scores and risk-model backtests on several seeds.
 
-    uv run python scripts/evaluate.py > docs/evaluation.md
+uv run python scripts/evaluate.py > docs/evaluation.md
 """
 
 from __future__ import annotations

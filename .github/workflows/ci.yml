@@ -20,7 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --locked
+      - run: uv sync --locked --all-extras
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
@@ -39,9 +39,38 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python }}
-      - run: uv sync --locked
+      - run: uv sync --locked --all-extras
       - run: uv run pytest
       - run: uv run costguard --version
+      - name: Smoke test the CLI end to end
+        shell: bash
+        run: |
+          uv run costguard --db smoke.duckdb generate --days 120
+          uv run costguard --db smoke.duckdb dashboard -f json > /dev/null
+          uv run costguard --db smoke.duckdb risk --paths 1000 -f json > /dev/null
+          uv run costguard audit -f html -o audit.html
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: costguard:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Container runs as non-root and the API answers
+        run: |
+          test "$(docker run --rm --entrypoint id costguard:ci -u)" = "10001"
+          docker run --rm -v cgdata:/data costguard:ci generate --days 60
+          docker run -d --name api -p 8000:8000 -v cgdata:/data:ro \
+            -e 'COSTGUARD_API_KEYS=["ci-key"]' costguard:ci
+          for i in $(seq 1 20); do curl -fs localhost:8000/health && break; sleep 1; done
+          curl -fs -H 'X-API-Key: ci-key' localhost:8000/v1/dashboard | head -c 300
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/v1/dashboard)" = "401"
 
   secrets:
     runs-on: ubuntu-latest

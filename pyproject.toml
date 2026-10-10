@@ -1,12 +1,18 @@
 [project]
 name = "costguard"
-version = "0.1.0"
+version = "1.0.0"
 description = "AWS FinOps and cost-risk toolkit: anomalies, forecasts, Cost-at-Risk, waste and finance analytics."
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Ronak", email = "ronakarun14@gmail.com" }]
 requires-python = ">=3.12"
+keywords = ["aws", "finops", "cloud-cost", "anomaly-detection", "forecasting", "risk"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -27,6 +33,21 @@ dependencies = [
     "typer>=0.12",
 ]
 
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+dashboard = [
+    "streamlit>=1.38",
+    "altair>=5",
+]
+all = ["costguard[api,dashboard]"]
+
+[project.urls]
+Repository = "https://github.com/your-github-username/costguard"
+Documentation = "https://github.com/your-github-username/costguard#readme"
+
 [project.scripts]
 costguard = "costguard.cli:app"
 
@@ -42,6 +63,7 @@ dev = [
     "moto[budgets,cloudwatch,ec2,sts]>=5.0",
     "scipy-stubs>=1.18.1.1",
     "pytest-xdist>=3.8.0",
+    "httpx>=0.28.1",
 ]
 
 [build-system]
@@ -84,10 +106,17 @@ mypy_path = "src"
 module = ["statsmodels.*", "sklearn.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = ["costguard.interfaces.dashboard_app"]
+disallow_untyped_calls = false  # altair's fluent API is untyped
+
 # ---------- pytest ----------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers -n auto --cov=costguard --cov-report=term-missing"
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 
 [tool.coverage.run]
 omit = ["src/costguard/__main__.py"]  # exercised via subprocess in tests
