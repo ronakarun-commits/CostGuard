@@ -1,6 +1,6 @@
 # costguard
 
-[![CI](https://github.com/your-github-username/costguard/actions/workflows/ci.yml/badge.svg)](https://github.com/your-github-username/costguard/actions/workflows/ci.yml)
+[![CI](https://github.com/ronakarun-commits/CostGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/ronakarun-commits/CostGuard/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
 ![Coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -32,7 +32,7 @@ Connecting to AWS needs only a read-only IAM policy.
 
 ```powershell
 # Windows PowerShell (macOS/Linux: same commands)
-git clone https://github.com/your-github-username/costguard.git
+git clone https://github.com/ronakarun-commits/CostGuard.git
 cd costguard
 uv sync --all-extras
 
