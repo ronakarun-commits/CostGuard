@@ -5,14 +5,17 @@ Only argument parsing and output live here; business logic belongs in ``costguar
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 
 from costguard import __version__
 from costguard.core.models import DateRange
+from costguard.errors import CostGuardError
 from costguard.interfaces.console import anomalies_table, console, err_console, summary_table
 from costguard.providers.synthetic import ACCOUNTS, SyntheticProvider
 from costguard.storage.duckdb_repo import DuckDBRepository, GroupBy
@@ -25,7 +28,35 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 
+aws_app = typer.Typer(help="Inspect the AWS connection (read-only).", no_args_is_help=True)
+app.add_typer(aws_app, name="aws")
+
 DEFAULT_DB = Path(".costguard") / "costguard.duckdb"
+
+Detail = Literal["service", "usage_type"]
+Metric = Literal["UnblendedCost", "AmortizedCost", "NetUnblendedCost"]
+
+
+def handle_errors[**P, R](func: Callable[P, R]) -> Callable[P, R]:
+    """Turn CostGuardError into a friendly message + a specific exit code (no traceback)."""
+
+    @functools.wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return func(*args, **kwargs)
+        except CostGuardError as exc:
+            err_console.print(f"[bold red]Error:[/] {exc}")
+            if exc.hint:
+                err_console.print(f"[yellow]Hint:[/] {exc.hint}")
+            raise typer.Exit(code=exc.exit_code) from exc
+
+    return wrapper
+
+
+ProfileOption = Annotated[
+    str | None, typer.Option("--profile", envvar="AWS_PROFILE", help="AWS named profile.")
+]
+RegionOption = Annotated[str | None, typer.Option("--region", envvar="AWS_REGION")]
 
 DbOption = Annotated[
     Path,
@@ -129,3 +160,79 @@ def labels(db: DbOption = DEFAULT_DB) -> None:
         raise typer.Exit(code=1)
     names = {a.id: a.name for a in ACCOUNTS}
     console.print(anomalies_table(anomalies, names))
+
+
+# ---- AWS ---------------------------------------------------------------------------------------
+
+
+@aws_app.command("whoami")
+@handle_errors
+def aws_whoami(profile: ProfileOption = None, region: RegionOption = None) -> None:
+    """Show which AWS identity costguard would use (free: sts:GetCallerIdentity)."""
+    from costguard.providers.aws.session import make_session, whoami
+
+    ident = whoami(make_session(profile, region))
+    console.print(f"Account [bold]{ident.account_id}[/]\nARN     {ident.arn}")
+    if ident.is_root:
+        err_console.print(
+            "[bold red]Warning:[/] these are ROOT credentials. Create a read-only IAM user or "
+            "SSO role for costguard and delete the root access keys."
+        )
+
+
+@aws_app.command("budgets")
+@handle_errors
+def aws_budgets(profile: ProfileOption = None, region: RegionOption = None) -> None:
+    """List AWS Budgets for the account (free API)."""
+    from costguard.providers.aws.budgets import get_budgets
+    from costguard.providers.aws.session import make_session, whoami
+
+    session = make_session(profile, region)
+    found = get_budgets(session, whoami(session).account_id)
+    if not found:
+        console.print("No cost budgets found.")
+        return
+    for b in found:
+        console.print(f"{b.name}: {b.amount:,.2f} {b.currency} / {b.period.lower()}")
+
+
+@app.command()
+@handle_errors
+def pull(
+    db: DbOption = DEFAULT_DB,
+    profile: ProfileOption = None,
+    region: RegionOption = None,
+    days: Annotated[int, typer.Option(min=1, max=365, help="Days of history to pull.")] = 90,
+    detail: Annotated[
+        Detail, typer.Option(help="service (multi-account) or usage_type (price-volume ready).")
+    ] = "service",
+    metric: Annotated[Metric, typer.Option(help="Cost metric to store.")] = ("UnblendedCost"),
+    refresh: Annotated[bool, typer.Option(help="Ignore the cache (costs $0.01/request).")] = False,
+) -> None:
+    """Pull daily cost from AWS Cost Explorer into the local database.
+
+    [yellow]Costs $0.01 per Cost Explorer request.[/] Responses are cached, so re-running is free.
+    """
+    from costguard.providers.aws.cost_explorer import CostExplorerProvider
+    from costguard.providers.aws.session import make_session
+
+    today = date.today()
+    period = DateRange(today - timedelta(days=days), today)
+    session = make_session(profile, region)
+    with DuckDBRepository(db) as repo:
+        provider = CostExplorerProvider(
+            session,
+            repo,
+            detail=detail,
+            metric=metric,
+            refresh=refresh,
+            today=today,
+        )
+        with console.status("Querying Cost Explorer..."):
+            records = provider.get_costs(period)
+        n = repo.upsert_costs(records, source=provider.name)
+    console.print(
+        f"[green]✓[/] {n:,} records ({period.start} → {period.end - timedelta(days=1)}) saved to "
+        f"[bold]{db}[/]. Requests: {provider.paid_requests} paid "
+        f"(~${provider.estimated_cost_usd:.2f}), {provider.cached_requests} from cache."
+    )

@@ -15,6 +15,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "boto3>=1.35",
     "duckdb>=1.1",
     "numpy>=2.0",
     "pandas>=2.2",
@@ -33,6 +34,8 @@ dev = [
     "mypy>=1.11",
     "pre-commit>=3.8",
     "pandas-stubs>=3.0.5.260914",
+    "boto3-stubs[budgets,ce,cloudwatch,ec2,sts]>=1.35",
+    "moto[budgets,cloudwatch,ec2,sts]>=5.0",
 ]
 
 [build-system]

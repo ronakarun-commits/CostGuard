@@ -113,3 +113,13 @@ class DateRange:
     @property
     def days(self) -> int:
         return (self.end - self.start).days
+
+
+@dataclass(frozen=True, slots=True)
+class Budget:
+    """A spend budget (AWS Budgets, or set in costguard config)."""
+
+    name: str
+    amount: float
+    currency: str = "USD"
+    period: str = "MONTHLY"

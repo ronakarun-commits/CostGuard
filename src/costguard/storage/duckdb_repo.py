@@ -255,12 +255,19 @@ class DuckDBRepository:
 
     # ---- API cache (used by the AWS provider) --------------------------------------------------
 
-    def cache_get(self, key: str) -> str | None:
-        row = self.con.execute("SELECT response FROM api_cache WHERE key = ?", [key]).fetchone()
+    def cache_get(self, key: str, max_age_seconds: float | None = None) -> str | None:
+        """Cached response, or None if missing or older than ``max_age_seconds``."""
+        sql = "SELECT response FROM api_cache WHERE key = ?"
+        params: list[Any] = [key]
+        if max_age_seconds is not None:
+            sql += " AND created_at >= current_timestamp::TIMESTAMP - to_seconds(?)"
+            params.append(max_age_seconds)
+        row = self.con.execute(sql, params).fetchone()
         return str(row[0]) if row else None
 
     def cache_put(self, key: str, operation: str, response: str) -> None:
         self.con.execute(
-            "INSERT OR REPLACE INTO api_cache (key, operation, response) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO api_cache (key, operation, response, created_at) "
+            "VALUES (?, ?, ?, current_timestamp::TIMESTAMP)",
             [key, operation, response],
         )
