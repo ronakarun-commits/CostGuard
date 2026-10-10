@@ -15,6 +15,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "duckdb>=1.1",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "rich>=13.7",
     "typer>=0.12",
 ]
 
@@ -28,6 +32,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pre-commit>=3.8",
+    "pandas-stubs>=3.0.5.260914",
 ]
 
 [build-system]
@@ -54,6 +59,8 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]   # assert is how pytest works
+# SQL there is built only from allow-listed constants; values always go through ? params
+"src/costguard/storage/**" = ["S608"]
 
 # ---------- mypy ----------
 [tool.mypy]

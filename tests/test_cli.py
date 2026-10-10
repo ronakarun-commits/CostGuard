@@ -44,3 +44,37 @@ def test_module_entrypoint() -> None:
         check=True,
     )
     assert __version__ in proc.stdout
+
+
+def test_generate_show_labels(tmp_path: object) -> None:
+    from pathlib import Path
+
+    db = str(Path(str(tmp_path)) / "cg.duckdb")
+    result = runner.invoke(app, ["generate", "--db", db, "--days", "120", "--end", "2026-06-30"])
+    assert result.exit_code == 0, result.output
+    assert "labelled anomalies" in result.stdout
+
+    for by in ("service", "account", "month"):
+        result = runner.invoke(app, ["show", "--db", db, "--by", by])
+        assert result.exit_code == 0, result.output
+        assert "Total" in result.stdout
+
+    result = runner.invoke(app, ["show", "--db", db, "--all"])
+    assert "2026-03-03" in result.stdout
+
+    result = runner.invoke(app, ["labels", "--db", db])
+    assert result.exit_code == 0
+    assert "A001" in result.stdout
+
+
+def test_show_without_data_fails(tmp_path: object) -> None:
+    from pathlib import Path
+
+    db = str(Path(str(tmp_path)) / "empty.duckdb")
+    assert runner.invoke(app, ["show", "--db", db]).exit_code == 1
+    assert runner.invoke(app, ["labels", "--db", db]).exit_code == 1
+
+
+def test_show_rejects_bad_dimension(tmp_path: object) -> None:
+    result = runner.invoke(app, ["show", "--by", "nope"])
+    assert result.exit_code == 2
