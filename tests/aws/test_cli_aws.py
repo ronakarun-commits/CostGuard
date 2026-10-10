@@ -56,10 +56,10 @@ def test_pull_stores_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(CostExplorerProvider, "get_costs", fake_get_costs)
     db = str(tmp_path / "aws.duckdb")
-    result = runner.invoke(app, ["pull", "--db", db, "--days", "7"])
+    result = runner.invoke(app, ["--db", db, "pull", "--days", "7"])
     assert result.exit_code == 0, result.output
     assert "Requests: 1 paid" in " ".join(result.stdout.split())
-    show = runner.invoke(app, ["show", "--db", db, "--all"])
+    show = runner.invoke(app, ["--db", db, "show", "--all"])
     assert "AWS Lambda" in show.stdout
 
 

@@ -34,3 +34,19 @@ def loaded_repo(repo: DuckDBRepository, provider: SyntheticProvider) -> DuckDBRe
 @pytest.fixture
 def db_path(tmp_path: Path) -> Path:
     return tmp_path / "cg.duckdb"
+
+
+@pytest.fixture(autouse=True)
+def isolated_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Never pick up the developer's costguard.toml / .env / COSTGUARD_* variables."""
+    import os
+
+    for var in list(os.environ):
+        if var.startswith("COSTGUARD_"):
+            monkeypatch.delenv(var)
+    monkeypatch.chdir(tmp_path)
+
+
+def flat(text: str) -> str:
+    """Collapse Rich line-wrapping so assertions don't depend on terminal width."""
+    return " ".join(text.split())

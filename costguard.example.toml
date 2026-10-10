@@ -1,0 +1,13 @@
+# Copy to costguard.toml (git-ignored values like webhooks belong in .env instead).
+# Precedence: CLI flags > COSTGUARD_* env vars > .env > costguard.toml > defaults.
+
+db_path = ".costguard/costguard.duckdb"
+budget_monthly_usd = 26000
+reporting_currency = "USD"        # or "INR"
+usd_inr_fallback_rate = 88.0      # used only when live FX rates are unavailable
+
+aws_profile = "costguard"
+aws_regions = ["ap-south-1", "us-east-1"]
+
+log_level = "WARNING"             # DEBUG / INFO / WARNING / ERROR
+log_format = "console"            # or "json" for cron / containers

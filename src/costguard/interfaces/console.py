@@ -19,15 +19,15 @@ def money(value: float, currency: str = "USD") -> str:
     return f"{symbol}{value:,.2f}" if symbol else f"{value:,.2f} {currency}"
 
 
-def summary_table(df: pd.DataFrame, title: str, key_label: str) -> Table:
+def summary_table(df: pd.DataFrame, title: str, key_label: str, currency: str = "USD") -> Table:
     total = float(df["cost"].sum()) if not df.empty else 0.0
     table = Table(title=title, title_justify="left", show_footer=True)
     table.add_column(key_label, footer="Total")
-    table.add_column("Cost", justify="right", footer=money(total))
+    table.add_column("Cost", justify="right", footer=money(total, currency))
     table.add_column("Share", justify="right", footer="100%" if total else "")
     for key, cost in zip(df["key"].astype(str), df["cost"].astype(float), strict=True):
         share = f"{cost / total:.1%}" if total else "-"
-        table.add_row(key, money(cost), share)
+        table.add_row(key, money(cost, currency), share)
     return table
 
 
