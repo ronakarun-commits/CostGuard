@@ -8,6 +8,7 @@ Exit codes: 0 ok · 1 error · 2 bad usage/config · 3 no data · 4 AWS auth · 
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import logging
 import sys
@@ -98,6 +99,18 @@ def _state(ctx: typer.Context) -> State:
     return obj
 
 
+def _utf8_output() -> None:
+    """Windows writes redirected/piped output in the legacy code page (cp1252), which can't encode
+    characters costguard prints (✓ → ₹). Switch stdout/stderr to UTF-8 so `costguard ... > file`
+    and CI logs work everywhere."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        reconfigure = getattr(stream, "reconfigure", None)
+        if encoding != "utf8" and reconfigure is not None:
+            with contextlib.suppress(ValueError, OSError):
+                reconfigure(encoding="utf-8", errors="replace")
+
+
 def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"costguard {__version__}")
@@ -135,6 +148,7 @@ def main(
 
     Settings come from flags, COSTGUARD_* env vars, .env, then costguard.toml.
     """  # fmt: skip
+    _utf8_output()
     level = {0: None, 1: "INFO"}.get(verbose, "DEBUG")
     settings = load_settings(
         db_path=db, reporting_currency=currency, log_level=level,

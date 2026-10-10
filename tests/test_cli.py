@@ -171,3 +171,19 @@ def test_verbose_json_logging(tmp_path: object) -> None:
     db = str(Path(str(tmp_path)) / "cg.duckdb")
     result = runner.invoke(app, ["--db", db, "-v", "--log-json", "generate", "--days", "30"])
     assert result.exit_code == 0
+
+
+def test_output_works_with_windows_legacy_encoding(tmp_path: object) -> None:
+    """Windows pipes default to cp1252, which can't encode ✓ or →. The CLI must not crash."""
+    import os
+    from pathlib import Path
+
+    db = str(Path(str(tmp_path)) / "enc.duckdb")
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    for args in (["generate", "--days", "40"], ["show"], ["-c", "INR", "dashboard"]):
+        proc = subprocess.run(  # noqa: S603 - fixed, trusted arguments
+            [sys.executable, "-m", "costguard", "--db", db, *args],
+            capture_output=True, env=env, check=False,
+        )  # fmt: skip
+        assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")[-500:]
+    assert "₹".encode() in proc.stdout
