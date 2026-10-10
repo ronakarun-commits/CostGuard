@@ -25,6 +25,7 @@ _BARS = "▁▂▃▄▅▆▇█"
 
 def fmt_money(value: float, currency: str) -> str:
     sym = _SYMBOL.get(currency, "")
+    value = 0.0 if abs(value) < 0.005 else value  # no "-$0.00" from rounding noise
     sign = "-" if value < 0 else ""
     return f"{sign}{sym}{abs(value):,.2f}" if sym else f"{value:,.2f} {currency}"
 

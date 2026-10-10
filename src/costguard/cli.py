@@ -17,6 +17,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
+import numpy as np
+import pandas as pd
 import typer
 
 from costguard import __version__
@@ -457,3 +459,314 @@ def pull(
         f"[bold]{state.settings.db_path}[/]. Requests: {provider.paid_requests} paid "
         f"(~${provider.estimated_cost_usd:.2f}), {provider.cached_requests} from cache."
     )
+
+
+# ---- analytics (Phase 5) ---------------------------------------------------------------------
+
+MethodOption = Annotated[
+    Literal["baseline", "stl", "iforest"],
+    typer.Option("--method", "-m", help="baseline (causal, live), stl (retrospective), iforest."),
+]
+ModelOption = Annotated[
+    Literal["ets", "naive"], typer.Option("--model", help="ets (default) or naive benchmark.")
+]
+LevelOption = Annotated[
+    float, typer.Option("--level", min=0.8, max=0.995, help="Confidence level, e.g. 0.95.")
+]
+
+
+@app.command()
+@handle_errors
+def anomalies(
+    ctx: typer.Context,
+    method: MethodOption = "baseline",
+    last: Annotated[int, typer.Option(min=1, help="Report incidents from the last N days.")] = 30,
+    all_time: Annotated[bool, typer.Option("--all", help="Whole history.")] = False,
+    threshold: Annotated[float, typer.Option(min=1, help="Robust z-score threshold.")] = 4.0,
+    min_excess: Annotated[float, typer.Option(min=0, help="Min USD/day above expected.")] = 10.0,
+    fmt: FormatOption = "table",
+    output: OutputOption = None,
+) -> None:
+    """Detect unusual spend per account and service."""
+    from costguard.core.analytics.anomaly import DetectorConfig, detect
+    from costguard.core.insights import anomalies_report
+
+    state = _state(ctx)
+    with state.repo() as repo:
+        lo, hi = _require_data(repo)
+        costs = repo.costs_frame()
+    since = lo if all_time else max(lo, hi - timedelta(days=last - 1))
+    cfg = DetectorConfig(threshold=threshold, min_excess=min_excess)
+    with console.status(f"Scoring with {method}..."):
+        found = detect(costs, method, cfg, since=since)
+    _emit(anomalies_report(found, method=method, currency=state.currency, fx=state.fx,
+                           since=str(since)), fmt, output)  # fmt: skip
+
+
+@app.command()
+@handle_errors
+def evaluate(
+    ctx: typer.Context,
+    methods: Annotated[
+        list[str] | None, typer.Option("--method", "-m", help="Methods to compare (default all).")
+    ] = None,
+    fmt: FormatOption = "table",
+    output: OutputOption = None,
+) -> None:
+    """Score anomaly detectors against the labelled synthetic anomalies (precision/recall/F1)."""
+    from costguard.core.analytics.anomaly import METHODS, detect
+    from costguard.core.analytics.anomaly import evaluate as score
+    from costguard.core.insights import evaluation_report
+
+    state = _state(ctx)
+    chosen = methods or list(METHODS)
+    bad = set(chosen) - set(METHODS)
+    if bad:
+        raise typer.BadParameter(f"unknown method(s): {', '.join(sorted(bad))}", param_hint="-m")
+    with state.repo() as repo:
+        _require_data(repo)
+        costs = repo.costs_frame()
+        labels = repo.get_anomalies()
+    if not labels:
+        raise NoDataError("No labelled anomalies.", "Evaluation needs `costguard generate` data.")
+    results = []
+    for m in chosen:
+        with console.status(f"Evaluating {m}..."):
+            results.append(score(detect(costs, m), labels, m))  # type: ignore[arg-type]
+    _emit(evaluation_report(results), fmt, output)
+
+
+@app.command()
+@handle_errors
+def forecast(
+    ctx: typer.Context,
+    days: Annotated[int, typer.Option(min=1, max=180, help="Days ahead.")] = 30,
+    model: ModelOption = "ets",
+    paths: Annotated[int, typer.Option(min=100, max=20000, help="Monte Carlo paths.")] = 2000,
+    seed: Annotated[int, typer.Option(help="Random seed.")] = 0,
+    fmt: FormatOption = "table",
+    output: OutputOption = None,
+) -> None:
+    """Probabilistic forecast of total daily spend (median and 90% interval)."""
+    from costguard.core.analytics.forecast import forecast as run
+    from costguard.core.insights import forecast_report
+
+    state = _state(ctx)
+    with state.repo() as repo:
+        _require_data(repo)
+        series = repo.daily_series()["cost"]
+    with console.status("Simulating..."):
+        fc = run(series, days, model=model, n_paths=paths, seed=seed)
+    _emit(forecast_report(fc, currency=state.currency, fx=state.fx), fmt, output)
+
+
+@app.command()
+@handle_errors
+def risk(
+    ctx: typer.Context,
+    budget: Annotated[float | None, typer.Option(min=0, help="Monthly budget in USD.")] = None,
+    level: LevelOption = 0.95,
+    model: ModelOption = "ets",
+    calibrate: Annotated[
+        bool, typer.Option(help="Conformally calibrate bounds on past forecast errors.")
+    ] = True,
+    paths: Annotated[int, typer.Option(min=500, max=50000, help="Monte Carlo paths.")] = 5000,
+    seed: Annotated[int, typer.Option(help="Random seed.")] = 0,
+    fmt: FormatOption = "table",
+    output: OutputOption = None,
+) -> None:
+    """Month-end Cost-at-Risk, Expected Shortfall and probability of breaching the budget."""
+    from costguard.core.analytics.risk import month_end_risk
+    from costguard.core.insights import risk_report
+
+    state = _state(ctx)
+    with state.repo() as repo:
+        _require_data(repo)
+        series = repo.daily_series()["cost"]
+    with console.status("Simulating month-end..."):
+        result = month_end_risk(series, budget=budget or state.settings.budget_monthly_usd,
+                                level=level, model=model, n_paths=paths, seed=seed,
+                                calibrate=calibrate)  # fmt: skip
+    _emit(risk_report(result, currency=state.currency, fx=state.fx, calibrated=calibrate),
+          fmt, output)  # fmt: skip
+
+
+@app.command()
+@handle_errors
+def backtest(
+    ctx: typer.Context,
+    level: LevelOption = 0.95,
+    model: ModelOption = "ets",
+    fmt: FormatOption = "table",
+    output: OutputOption = None,
+) -> None:
+    """Backtest risk bounds (Kupiec test, raw vs calibrated) and month-end forecast accuracy."""
+    from costguard.core.analytics.risk import kupiec_pof, month_end_backtest, var_backtest
+    from costguard.core.insights import backtest_report
+
+    state = _state(ctx)
+    with state.repo() as repo:
+        _require_data(repo)
+        series = repo.daily_series()["cost"]
+    if len(series) < 150:
+        raise NoDataError("Backtesting needs at least 150 days of history.")
+    with console.status("Backtesting (rolling re-fits)..."):
+        df, cal = var_backtest(series, level=level, model=model)
+        raw = kupiec_pof(int((df["actual"] > df["raw_bound"]).sum()), len(df), 1 - level)
+        month = month_end_backtest(series, model=model, level=level)
+    _emit(backtest_report(raw, cal, month, level=level, model=model), fmt, output)
+
+
+# ---- finance (Phase 6) -----------------------------------------------------------------------
+
+
+def _month_range(month: str) -> DateRange:
+    try:
+        start = date.fromisoformat(f"{month}-01")
+    except ValueError as exc:
+        raise typer.BadParameter("use YYYY-MM", param_hint="month") from exc
+    nxt = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return DateRange(start, nxt)
+
+
+@app.command()
+@handle_errors
+def variance(
+    ctx: typer.Context,
+    current: Annotated[str | None, typer.Option(help="Month to explain, YYYY-MM.")] = None,
+    base: Annotated[str | None, typer.Option(help="Comparison month, YYYY-MM.")] = None,
+    budget: Annotated[float | None, typer.Option(min=0, help="Monthly budget in USD.")] = None,
+    fmt: FormatOption = "table",
+    output: OutputOption = None,
+) -> None:
+    """Explain a month's change: calendar, volume (usage) and price (rate) effects."""
+    from costguard.core.finance.variance import price_volume
+    from costguard.core.insights import variance_report
+
+    state = _state(ctx)
+    with state.repo() as repo:
+        _, hi = _require_data(repo)
+        costs = repo.costs_frame()
+    if current is None:  # default: last complete month
+        last_full = (
+            hi if (hi + timedelta(days=1)).day == 1 else hi.replace(day=1) - timedelta(days=1)
+        )
+        current = f"{last_full:%Y-%m}"
+    cur = _month_range(current)
+    base_range = (
+        _month_range(base) if base else _month_range(f"{cur.start - timedelta(days=1):%Y-%m}")
+    )
+    result = price_volume(costs, base_range, cur)
+    if result.totals["cost_base"] == 0 and result.totals["cost_current"] == 0:
+        raise NoDataError(f"No cost data for {base_range.start:%Y-%m} or {current}.")
+    if result.totals["unattributed"] and abs(result.totals["unattributed"]) > 0.5 * abs(
+        result.totals["change"] or 1
+    ):
+        err_console.print(
+            "[yellow]Most of the change is unattributed:[/] this data has mixed usage units. "
+            "Pull with `costguard pull --detail usage_type` for a price/volume split."
+        )
+    report = variance_report(
+        result, currency=state.currency, fx=state.fx,
+        budget=budget or state.settings.budget_monthly_usd,
+    )  # fmt: skip
+    _emit(report, fmt, output)
+
+
+COMMITMENT_SERVICES = ("Amazon Elastic Compute Cloud - Compute", "AWS Lambda", "AWS Fargate")
+
+
+@app.command()
+@handle_errors
+def commitments(
+    ctx: typer.Context,
+    rate: Annotated[float, typer.Option(min=0, max=1, help="Annual cost of capital.")] = 0.10,
+    objective: Annotated[
+        Literal["p5", "mean"],
+        typer.Option(help="p5 = robust (5th-percentile NPV), mean = expected NPV."),
+    ] = "p5",
+    paths: Annotated[int, typer.Option(min=200, max=20000, help="Monte Carlo paths.")] = 2000,
+    seed: Annotated[int, typer.Option(help="Random seed.")] = 0,
+    fmt: FormatOption = "table",
+    output: OutputOption = None,
+) -> None:
+    """Size a Compute Savings Plan: optimal commitment, NPV and risk for each term/payment."""
+    from costguard.core.finance.commitments import recommend
+    from costguard.core.insights import commitments_report
+
+    state = _state(ctx)
+    with state.repo() as repo:
+        _require_data(repo)
+        wide = repo.daily_series(by="service")
+    cols = [c for c in COMMITMENT_SERVICES if c in wide.columns]
+    if not cols:
+        raise NoDataError("No Savings-Plan-eligible compute spend (EC2, Lambda, Fargate) found.")
+    if len(wide) < 60:
+        raise NoDataError("Need at least 60 days of history to model usage.")
+    with console.status("Simulating usage and optimising commitments..."):
+        plans = recommend(wide[cols].sum(axis=1), annual_rate=rate, objective=objective,
+                          n_paths=paths, seed=seed)  # fmt: skip
+    _emit(commitments_report(plans, currency=state.currency, fx=state.fx, rate=rate,
+                             objective=objective), fmt, output)  # fmt: skip
+
+
+@app.command()
+@handle_errors
+def fx(
+    ctx: typer.Context,
+    fx_source: Annotated[
+        Literal["ecb", "synthetic"],
+        typer.Option("--fx-source", help="ecb = real ECB rates (internet), synthetic = offline."),
+    ] = "ecb",
+    refresh: Annotated[bool, typer.Option(help="Re-download rates even if cached.")] = False,
+    stress_pct: Annotated[
+        list[float] | None,
+        typer.Option("--stress", help="INR depreciation shocks in %, repeatable (default 5, 10)."),
+    ] = None,
+    level: LevelOption = 0.95,
+    fmt: FormatOption = "table",
+    output: OutputOption = None,
+) -> None:
+    """USD bill in INR: monthly usage-vs-FX bridge and month-end FX stress test."""
+    from costguard.core.analytics.forecast import forecast as run
+    from costguard.core.analytics.forecast import month_end_horizon
+    from costguard.core.finance.fx import (
+        daily_rates,
+        fx_vol,
+        monthly_bridge,
+        stress,
+        synthetic_rates,
+    )
+    from costguard.core.insights import fx_report
+
+    with _state(ctx).repo() as repo:
+        lo, hi = _require_data(repo)
+        series = repo.daily_series()["cost"]
+        rates, source = repo.get_fx("USD", "INR")
+        have = (not rates.empty and rates.index.min() <= pd.Timestamp(lo) + pd.Timedelta(days=5)
+                and rates.index.max() >= pd.Timestamp(hi) - pd.Timedelta(days=5))  # fmt: skip
+        if refresh or not have or (source or "") != fx_source:
+            if fx_source == "ecb":
+                from costguard.providers.fx_ecb import fetch_rates
+
+                with console.status("Downloading ECB USD/INR rates..."):
+                    rates = fetch_rates(lo - timedelta(days=7), hi)
+            else:
+                rates = synthetic_rates(pd.Timestamp(lo) - pd.Timedelta(days=7), pd.Timestamp(hi))
+            repo.upsert_fx(rates, "USD", "INR", fx_source)
+            source = fx_source
+    bridge = monthly_bridge(series, rates)
+    as_of = hi
+    remaining = month_end_horizon(as_of)
+    s_full = series.asfreq("D", fill_value=0.0)
+    month_mask = s_full.index >= pd.Timestamp(as_of.replace(day=1))
+    r_daily = daily_rates(rates, pd.DatetimeIndex(s_full.index))
+    mtd_inr = float((s_full[month_mask] * r_daily[month_mask]).sum())
+    spot = float(r_daily.iloc[-1])
+    rest = run(s_full, remaining, n_paths=4000).totals() if remaining > 0 else np.zeros(4000)
+    shocks = tuple(p / 100 for p in (stress_pct or [5.0, 10.0]))
+    result = stress(mtd_inr, rest, spot, fx_vol(rates), remaining, shocks=shocks, level=level)
+    label = (
+        "ECB reference rates (frankfurter.dev)" if source == "ecb" else "synthetic (offline demo)"
+    )
+    _emit(fx_report(bridge, result, source=label), fmt, output)

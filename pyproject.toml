@@ -21,6 +21,9 @@ dependencies = [
     "pandas>=2.2",
     "pydantic-settings>=2.5",
     "rich>=13.7",
+    "scikit-learn>=1.5",
+    "scipy>=1.13",
+    "statsmodels>=0.14",
     "typer>=0.12",
 ]
 
@@ -37,6 +40,8 @@ dev = [
     "pandas-stubs>=3.0.5.260914",
     "boto3-stubs[budgets,ce,cloudwatch,ec2,sts]>=1.35",
     "moto[budgets,cloudwatch,ec2,sts]>=5.0",
+    "scipy-stubs>=1.18.1.1",
+    "pytest-xdist>=3.8.0",
 ]
 
 [build-system]
@@ -61,7 +66,7 @@ select = [
     "S",        # bandit (security)
 ]
 
-allowed-confusables = ["–", "×"]
+allowed-confusables = ["–", "×", "α"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]   # assert is how pytest works
@@ -75,10 +80,14 @@ strict = true
 packages = ["costguard"]
 mypy_path = "src"
 
+[[tool.mypy.overrides]]
+module = ["statsmodels.*", "sklearn.*"]
+ignore_missing_imports = true
+
 # ---------- pytest ----------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --cov=costguard --cov-report=term-missing"
+addopts = "-ra --strict-markers -n auto --cov=costguard --cov-report=term-missing"
 
 [tool.coverage.run]
 omit = ["src/costguard/__main__.py"]  # exercised via subprocess in tests

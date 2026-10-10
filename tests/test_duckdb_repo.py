@@ -11,14 +11,14 @@ from costguard.storage.duckdb_repo import DuckDBRepository
 
 
 def test_migrations_applied(repo: DuckDBRepository) -> None:
-    assert repo.schema_version == 2
+    assert repo.schema_version == 3
 
 
 def test_migrations_idempotent_on_reopen(db_path: Path) -> None:
     with DuckDBRepository(db_path) as r:
-        assert r.schema_version == 2
+        assert r.schema_version == 3
     with DuckDBRepository(db_path) as r:
-        assert r.schema_version == 2
+        assert r.schema_version == 3
 
 
 def test_roundtrip(loaded_repo: DuckDBRepository, provider: SyntheticProvider) -> None:
@@ -94,3 +94,24 @@ def test_cache(repo: DuckDBRepository) -> None:
     assert repo.cache_get("k") is None
     repo.cache_put("k", "GetCostAndUsage", '{"a": 1}')
     assert repo.cache_get("k") == '{"a": 1}'
+
+
+def test_fx_roundtrip(repo: DuckDBRepository) -> None:
+    import pandas as pd
+
+    assert repo.get_fx("USD", "INR")[1] is None
+    rates = pd.Series([83.0, 83.5], index=pd.to_datetime(["2026-01-01", "2026-01-02"]))
+    assert repo.upsert_fx(rates, "USD", "INR", "ecb") == 2
+    assert repo.upsert_fx(rates.iloc[0:0], "USD", "INR", "ecb") == 0
+    got, source = repo.get_fx("USD", "INR")
+    assert source == "ecb"
+    assert list(got) == [83.0, 83.5]
+    assert repo.schema_version == 3
+
+
+def test_cache_max_age(repo: DuckDBRepository) -> None:
+    repo.cache_put("k", "op", "v")
+    assert repo.cache_get("k", max_age_seconds=3600) == "v"
+    repo.con.execute("UPDATE api_cache SET created_at = created_at - INTERVAL 2 HOUR")
+    assert repo.cache_get("k", max_age_seconds=3600) is None
+    assert repo.cache_get("k") == "v"

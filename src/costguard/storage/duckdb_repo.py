@@ -72,6 +72,17 @@ _MIGRATIONS: Final[list[str]] = [
         created_at TIMESTAMP NOT NULL DEFAULT current_timestamp
     );
     """,
+    # v3: FX reference rates (USD -> reporting currency)
+    """
+    CREATE TABLE fx_rates (
+        rate_date DATE    NOT NULL,
+        base      VARCHAR NOT NULL,
+        quote     VARCHAR NOT NULL,
+        rate      DOUBLE  NOT NULL,
+        source    VARCHAR NOT NULL,
+        PRIMARY KEY (rate_date, base, quote)
+    );
+    """,
 ]
 
 _COST_COLUMNS: Final = [
@@ -252,6 +263,34 @@ class DuckDBRepository:
         wide = df.pivot_table(index="charge_date", columns="key", values="cost", fill_value=0.0)
         wide.index = pd.to_datetime(wide.index)
         return wide
+
+    # ---- FX rates ----------------------------------------------------------------------------
+
+    def upsert_fx(self, rates: pd.Series, base: str, quote: str, source: str) -> int:
+        frame = pd.DataFrame({
+            "rate_date": pd.to_datetime(rates.index).date, "base": base, "quote": quote,
+            "rate": rates.to_numpy(dtype=float), "source": source,
+        })  # fmt: skip
+        if frame.empty:
+            return 0
+        self.con.register("fx_in", frame)
+        try:
+            self.con.execute("INSERT OR REPLACE INTO fx_rates SELECT * FROM fx_in")
+        finally:
+            self.con.unregister("fx_in")
+        return len(frame)
+
+    def get_fx(self, base: str, quote: str) -> tuple[pd.Series, str | None]:
+        """Rates as a date-indexed Series, plus the source (None if none stored)."""
+        df = self.con.execute(
+            "SELECT rate_date, rate, source FROM fx_rates WHERE base = ? AND quote = ? "
+            "ORDER BY rate_date",
+            [base, quote],
+        ).df()
+        if df.empty:
+            return pd.Series(dtype=float), None
+        series = pd.Series(df["rate"].to_numpy(), index=pd.to_datetime(df["rate_date"]))
+        return series, str(df["source"].iloc[-1])
 
     # ---- API cache (used by the AWS provider) --------------------------------------------------
 
