@@ -159,8 +159,8 @@ def test_ui_launches_streamlit(db: str, monkeypatch: pytest.MonkeyPatch) -> None
     result = runner.invoke(app, ["--db", db, "ui"])
     assert result.exit_code == 0
     args, env = calls[0]
-    assert args[1] == "run"
-    assert args[2].endswith("dashboard_app.py")
+    assert args[1:4] == ["-m", "streamlit", "run"]
+    assert args[4].endswith("dashboard_app.py")
     assert env["COSTGUARD_DB_PATH"].endswith("cg.duckdb")
 
 

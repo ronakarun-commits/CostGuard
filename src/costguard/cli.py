@@ -760,7 +760,6 @@ def ui(
 ) -> None:
     """Open the Streamlit dashboard (needs `costguard[dashboard]`)."""
     import os
-    import shutil
     import subprocess
     from importlib.util import find_spec
 
@@ -772,11 +771,12 @@ def ui(
         )
     script = Path(__file__).parent / "interfaces" / "dashboard_app.py"
     env = {**os.environ, "COSTGUARD_DB_PATH": str(_state(ctx).settings.db_path.resolve())}
-    exe = shutil.which("streamlit") or "streamlit"
+    # Run Streamlit with *this* interpreter (python -m streamlit), never whatever "streamlit"
+    # happens to be first on PATH (e.g. Anaconda's), which can't import costguard.
     raise typer.Exit(
         subprocess.call(  # noqa: S603 - fixed arguments, no shell
-            [exe, "run", str(script), "--server.port", str(port), "--server.headless", "false",
-             "--browser.gatherUsageStats", "false"],
+            [sys.executable, "-m", "streamlit", "run", str(script), "--server.port", str(port),
+             "--server.headless", "false", "--browser.gatherUsageStats", "false"],
             env=env,
         )
     )  # fmt: skip

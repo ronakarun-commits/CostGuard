@@ -37,3 +37,4 @@ credentials
 Thumbs.db
 .cg-sync.zip
 costguard.toml
+.coverage.*
